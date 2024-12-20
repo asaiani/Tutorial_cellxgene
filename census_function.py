@@ -137,7 +137,9 @@ def save_adata_slices(dataset_id, donor_ids, organism, main_directory):
             
             # Check if the slice is not empty
             if adata_slice.n_obs > 0:
-                file_name = f"{dataset_id}_{donor_id}.h5ad"
+                # Sanitize the donor_id to replace problematic characters
+                sanitized_donor_id = donor_id.replace("/", "_")
+                file_name = f"{dataset_id}_{sanitized_donor_id}.h5ad"
                 file_path = os.path.join(dataset_directory, file_name)
                 adata_slice.write(file_path)
                 print(f"Saved AnnData slice for dataset_id '{dataset_id}' and donor_id '{donor_id}' in '{file_path}'")
@@ -236,7 +238,8 @@ def aggregate_donor_id(dataset_id, donor_ids, organism="Mus musculus", main_dire
     
     for donor_id in donor_ids:
         # Construct the file path for the specific donor_id and dataset_id
-        file_name = f"{dataset_id}_{donor_id}.h5ad"
+        sanitized_donor_id = donor_id.replace("/", "_")
+        file_name = f"{dataset_id}_{sanitized_donor_id}.h5ad"
         file_path = os.path.join(dataset_directory, file_name)
 
         # Check if the file exists and load it if it does
@@ -272,3 +275,94 @@ def aggregate_donor_id(dataset_id, donor_ids, organism="Mus musculus", main_dire
     else:
         print("No AnnData files were found to aggregate.")
         return None
+
+def aggregate_across_datasets(dataset_to_donor_map, organism="Mus musculus", main_directory="datasets"):
+    """
+    Aggregates the AnnData files for multiple dataset_ids and their respective donor_ids.
+
+    Parameters:
+    - dataset_to_donor_map (dict): A dictionary where keys are dataset IDs and values are lists of donor IDs.
+    - organism (str): Organism name to use in the census query (default is 'Mus musculus').
+    - main_directory (str): Directory where AnnData slices are stored.
+
+    Returns:
+    - AnnData: A single AnnData object containing aggregated data across all dataset_ids.
+    """
+    # Initialize a list to collect aggregated AnnData objects for each dataset
+    dataset_adata_list = []
+
+    for dataset_id, donor_ids in dataset_to_donor_map.items():
+        print(f"Aggregating donors for dataset_id '{dataset_id}' with donors {donor_ids}...")
+        
+        # Aggregate all donor IDs for the current dataset
+        aggregated_adata = aggregate_donor_id(dataset_id, donor_ids, organism=organism, main_directory=main_directory)
+        
+        if aggregated_adata is not None:
+            # Add dataset_id information to the .obs for the concatenation
+            aggregated_adata.obs["dataset_id"] = dataset_id
+            dataset_adata_list.append(aggregated_adata)
+
+    # Concatenate all dataset-level aggregated AnnData objects
+    if dataset_adata_list:
+        # Use `keys` to keep track of both donor_id and dataset_id
+        aggregated_datasets = anndata.concat(dataset_adata_list, join="outer", index_unique="-")
+        # Grab all var DataFrames from our list of AnnData objects
+        all_var = [x.var for x in dataset_adata_list]
+        # Concatenate them
+        all_var = pd.concat(all_var, join="outer")
+        # Remove duplicates
+        all_var = all_var[~all_var.index.duplicated()]
+        # Assign the combined var DataFrame back to aggregated_adata
+        aggregated_datasets.var = all_var.loc[aggregated_adata.var_names]
+        # Adding a new 'dataset_id' column to the combined dataset
+        # This ensures that we preserve both donor_id and dataset_id
+        print(f"Final aggregated AnnData object created across {len(dataset_to_donor_map)} datasets with {aggregated_datasets.n_obs} observations.")
+        return aggregated_datasets
+    else:
+        print("No data found to aggregate across datasets.")
+        return None
+
+
+from anndata import AnnData
+
+def save_anndata_sliced_h5ad(adata: AnnData, output_dir: str, organism = 'Mus musculus'):
+    """
+    Save an AnnData object in slices organized by dataset_id and donor_id as .h5ad files.
+    
+    Args:
+        adata (AnnData): The input AnnData object with `dataset_id` and `donor_id` in `adata.obs`.
+        output_dir (str): The directory to save the sliced data.
+        
+    Returns:
+        None
+    """
+    # Check if required columns are in the AnnData object
+    if 'dataset_id' not in adata.obs or 'donor_id' not in adata.obs:
+        raise ValueError("The AnnData object must have 'dataset_id' and 'donor_id' in `adata.obs`.")
+    
+    # Create the output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Group the data by dataset_id
+    for dataset_id in adata.obs['dataset_id'].unique():
+        # Create a subfolder for the dataset_id
+        dataset_dir = os.path.join(output_dir, dataset_id)
+        os.makedirs(dataset_dir, exist_ok=True)
+        
+        # Filter the data for the current dataset_id
+        dataset_data = adata[adata.obs['dataset_id'] == dataset_id]
+        
+        # Group by donor_id within the dataset_id
+        for donor_id in dataset_data.obs['donor_id'].unique():
+            # Filter the data for the current donor_id
+            donor_data = dataset_data[dataset_data.obs['donor_id'] == donor_id].copy()
+            
+            # File name: dataset_id_donor_id.h5ad
+            file_name = f"{dataset_id}_{donor_id}.h5ad"
+            file_path = os.path.join(dataset_dir, file_name)
+            update_metadata_file(dataset_id, donor_id, organism, output_dir)
+            print('metadata_file')
+            # Save the data as .h5ad
+            donor_data.write_h5ad(file_path)
+            
+            print(f"Saved: {file_path}")
